@@ -91,7 +91,7 @@ void TestExt4FormatAndMount() {
     bool extOk = engine.ResolveExtents(rootInode, mappings);
     TEST_ASSERT(extOk, "ResolveExtents succeeded on Root inode");
     TEST_ASSERT(!mappings.empty(), "Root inode has at least one extent");
-    TEST_ASSERT(mappings[0].physicalBlock == 60, "Root directory block mapped to block 60");
+    TEST_ASSERT(mappings[0].physicalBlock == 517, "Root directory block mapped to block 517");
 
     // 5. Test Directory Traversal
     std::vector<titanext::DirEntryInfo> dirEntries;

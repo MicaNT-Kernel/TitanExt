@@ -379,10 +379,18 @@ public:
         uint32_t groupCount = static_cast<uint32_t>((totalBlocks + blocksPerGroup - 1) / blocksPerGroup);
         if (groupCount == 0) groupCount = 1;
 
+        uint32_t itableBlocks = (inodesPerGroup * 256) / BLK_SIZE; // 512 blocks
+        uint32_t itableStart = 5;
+        uint32_t rootDirBlockNum = itableStart + itableBlocks; // Block 517
+        uint32_t usedBlocks = 517; // Blocks 0..3, 5..517 (block 4 is free)
+
+        uint32_t blocksInGroup0 = static_cast<uint32_t>(std::min<uint64_t>(totalBlocks, blocksPerGroup));
+        uint32_t freeBlocksGroup0 = (blocksInGroup0 > usedBlocks) ? (blocksInGroup0 - usedBlocks) : 0;
+        uint64_t totalFreeBlocks = (totalBlocks > usedBlocks) ? (totalBlocks - usedBlocks) : 0;
+
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out.is_open()) return false;
 
-        // Allocate disk image sparse / zeroed
         std::vector<uint8_t> zeroBlock(BLK_SIZE, 0);
 
         // Block 0: Padding (1024 bytes) + Superblock (1024 bytes)
@@ -391,8 +399,9 @@ public:
         sb.s_inodes_count = groupCount * inodesPerGroup;
         sb.s_blocks_count_lo = static_cast<uint32_t>(totalBlocks & 0xFFFFFFFF);
         sb.s_blocks_count_hi = static_cast<uint32_t>((totalBlocks >> 32) & 0xFFFFFFFF);
-        sb.s_free_blocks_count_lo = static_cast<uint32_t>((totalBlocks - (groupCount * 100)) & 0xFFFFFFFF);
-        sb.s_free_inodes_count = sb.s_inodes_count - 11;
+        sb.s_free_blocks_count_lo = static_cast<uint32_t>(totalFreeBlocks & 0xFFFFFFFF);
+        sb.s_free_blocks_count_hi = static_cast<uint32_t>((totalFreeBlocks >> 32) & 0xFFFFFFFF);
+        sb.s_free_inodes_count = sb.s_inodes_count - 10;
         sb.s_first_data_block = 0; // For 4KB blocks
         sb.s_log_block_size = 2;   // 1024 << 2 = 4096
         sb.s_log_cluster_size = 2;
@@ -407,9 +416,16 @@ public:
         sb.s_rev_level = 1;  // Dynamic
         sb.s_first_ino = 11; // Standard first user inode
         sb.s_inode_size = 256;
-        sb.s_feature_compat = EXT4_FEATURE_COMPAT_HAS_JOURNAL | EXT4_FEATURE_COMPAT_DIR_INDEX;
+        sb.s_desc_size = 64; // 64-byte group descriptors (EXT4_FEATURE_INCOMPAT_64BIT)
+        sb.s_feature_compat = EXT4_FEATURE_COMPAT_DIR_INDEX;
         sb.s_feature_incompat = EXT4_FEATURE_INCOMPAT_FILETYPE | EXT4_FEATURE_INCOMPAT_EXTENTS | EXT4_FEATURE_INCOMPAT_64BIT;
-        sb.s_feature_ro_compat = EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT4_FEATURE_RO_COMPAT_LARGE_FILE | EXT4_FEATURE_RO_COMPAT_METADATA_CSUM;
+        sb.s_feature_ro_compat = EXT4_FEATURE_RO_COMPAT_SPARSE_SUPER | EXT4_FEATURE_RO_COMPAT_LARGE_FILE;
+        
+        for (int i = 0; i < 16; ++i) {
+            sb.s_uuid[i] = static_cast<uint8_t>((std::rand() ^ (sizeBytes >> (i * 2))) & 0xFF);
+        }
+        sb.s_uuid[6] = (sb.s_uuid[6] & 0x0F) | 0x40; // UUID v4
+        sb.s_uuid[8] = (sb.s_uuid[8] & 0x3F) | 0x80; // Variant RFC 4122
         
         std::strncpy(sb.s_volume_name, label.c_str(), sizeof(sb.s_volume_name) - 1);
         std::memcpy(block0.data() + 1024, &sb, sizeof(sb));
@@ -418,43 +434,50 @@ public:
 
         // Block 1: Group Descriptors Table (GDT)
         std::vector<uint8_t> gdtBlock(BLK_SIZE, 0);
-        uint64_t itableStart = 5; // Block 5 starts inode table
         Ext4GroupDesc gd{};
         gd.bg_block_bitmap_lo = 2;
         gd.bg_inode_bitmap_lo = 3;
-        gd.bg_inode_table_lo = static_cast<uint32_t>(itableStart);
-        gd.bg_free_blocks_count_lo = static_cast<uint16_t>(blocksPerGroup - 100);
-        gd.bg_free_inodes_count_lo = static_cast<uint16_t>(inodesPerGroup - 11);
-        gd.bg_used_dirs_count_lo = 2;
+        gd.bg_inode_table_lo = itableStart;
+        gd.bg_free_blocks_count_lo = static_cast<uint16_t>(freeBlocksGroup0 & 0xFFFF);
+        gd.bg_free_blocks_count_hi = static_cast<uint16_t>((freeBlocksGroup0 >> 16) & 0xFFFF);
+        gd.bg_free_inodes_count_lo = static_cast<uint16_t>(inodesPerGroup - 10);
+        gd.bg_used_dirs_count_lo = 1;
         std::memcpy(gdtBlock.data(), &gd, sizeof(gd));
         out.write(reinterpret_cast<const char*>(gdtBlock.data()), BLK_SIZE);
 
         // Block 2: Block allocation bitmap
         std::vector<uint8_t> blockBitmap(BLK_SIZE, 0);
-        // Mark blocks 0..50 as used
-        for (int i = 0; i < 7; ++i) blockBitmap[i] = 0xFF;
+        blockBitmap[0] = 0xEF; // bits 0..3 (blocks 0..3), bit 4 clear (block 4 free), bits 5..7 (blocks 5..7)
+        for (uint32_t i = 1; i < 64; ++i) blockBitmap[i] = 0xFF; // blocks 8..511
+        blockBitmap[64] = 0x3F; // 6 bits: blocks 512..516 (itable) + block 517 (root dir)
+        uint32_t validBitmapBytes = (blocksInGroup0 + 7) / 8;
+        if (validBitmapBytes < BLK_SIZE) {
+            std::memset(blockBitmap.data() + validBitmapBytes, 0xFF, BLK_SIZE - validBitmapBytes);
+        }
         out.write(reinterpret_cast<const char*>(blockBitmap.data()), BLK_SIZE);
 
         // Block 3: Inode allocation bitmap
         std::vector<uint8_t> inodeBitmap(BLK_SIZE, 0);
-        inodeBitmap[0] = 0xFF; // Inodes 1..8 allocated
-        inodeBitmap[1] = 0x07; // Inodes 9..11 allocated
+        inodeBitmap[0] = 0xFF; // Inodes 1..8
+        inodeBitmap[1] = 0x03; // Inodes 9..10
+        uint32_t validInodeBytes = (inodesPerGroup + 7) / 8;
+        if (validInodeBytes < BLK_SIZE) {
+            std::memset(inodeBitmap.data() + validInodeBytes, 0xFF, BLK_SIZE - validInodeBytes);
+        }
         out.write(reinterpret_cast<const char*>(inodeBitmap.data()), BLK_SIZE);
 
         // Block 4: Reserved
         out.write(reinterpret_cast<const char*>(zeroBlock.data()), BLK_SIZE);
 
         // Block 5: Inode Table (Root Inode is Inode #2)
-        // Inode 2 offset is at index (2 - 1) * 256 = 256 bytes in Block 5
         std::vector<uint8_t> itableBlock(BLK_SIZE, 0);
         Ext4Inode rootInode{};
         rootInode.i_mode = EXT4_S_IFDIR | 0755;
-        rootInode.i_links_count = 3; // ., .., lost+found
+        rootInode.i_links_count = 2; // ., ..
         rootInode.i_size_lo = BLK_SIZE;
         rootInode.i_blocks_lo = 8; // 8 * 512 bytes = 4096
         rootInode.i_flags = EXT4_EXTENTS_FL;
 
-        // Root Inode Extent: 1 block at physical block 60
         auto* extHdr = reinterpret_cast<Ext4ExtentHeader*>(rootInode.i_block);
         extHdr->eh_magic = EXT4_EXT_MAGIC;
         extHdr->eh_entries = 1;
@@ -464,17 +487,17 @@ public:
         auto* extLeaf = reinterpret_cast<Ext4Extent*>(rootInode.i_block + sizeof(Ext4ExtentHeader));
         extLeaf->ee_block = 0;
         extLeaf->ee_len = 1;
-        extLeaf->SetPhysicalBlock(60);
+        extLeaf->SetPhysicalBlock(rootDirBlockNum);
 
         std::memcpy(itableBlock.data() + 256, &rootInode, sizeof(rootInode));
         out.write(reinterpret_cast<const char*>(itableBlock.data()), BLK_SIZE);
 
-        // Write remaining padding blocks up to block 59
-        for (int b = 6; b < 60; ++b) {
+        // Write remaining blocks of the inode table (blocks 6 through 516)
+        for (uint32_t b = 1; b < itableBlocks; ++b) {
             out.write(reinterpret_cast<const char*>(zeroBlock.data()), BLK_SIZE);
         }
 
-        // Block 60: Root Directory Data Block
+        // Block 517: Root Directory Data Block
         // Contains '.' and '..'
         std::vector<uint8_t> rootDirBlock(BLK_SIZE, 0);
         auto* dot = reinterpret_cast<Ext4DirEntry2*>(rootDirBlock.data());
@@ -495,7 +518,7 @@ public:
         out.write(reinterpret_cast<const char*>(rootDirBlock.data()), BLK_SIZE);
 
         // Pad file to target size
-        uint64_t currentBlocks = 61;
+        uint64_t currentBlocks = rootDirBlockNum + 1;
         for (uint64_t b = currentBlocks; b < totalBlocks; ++b) {
             out.write(reinterpret_cast<const char*>(zeroBlock.data()), BLK_SIZE);
         }
