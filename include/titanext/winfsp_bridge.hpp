@@ -30,14 +30,13 @@ namespace titanext {
 #define STATUS_DIRECTORY_NOT_EMPTY       ((NTSTATUS)0xC0000101L)
 #endif
 
-#pragma pack(push, 1)
-
 struct FSP_FSCTL_VOLUME_INFO {
     UINT64 TotalSize;
     UINT64 FreeSize;
     UINT16 VolumeLabelLength;
     WCHAR  VolumeLabel[32];
 };
+static_assert(sizeof(FSP_FSCTL_VOLUME_INFO) == 88, "sizeof(FSP_FSCTL_VOLUME_INFO) must be 88");
 
 struct FSP_FSCTL_FILE_INFO {
     UINT32 FileAttributes;
@@ -52,6 +51,7 @@ struct FSP_FSCTL_FILE_INFO {
     UINT32 HardLinks;
     UINT32 EaSize;
 };
+static_assert(sizeof(FSP_FSCTL_FILE_INFO) == 72, "sizeof(FSP_FSCTL_FILE_INFO) must be 72");
 
 struct FSP_FSCTL_DIR_INFO {
     UINT16 Size;
@@ -60,8 +60,9 @@ struct FSP_FSCTL_DIR_INFO {
         UINT64 NextOffset;
         UINT8  Padding[24];
     };
-    WCHAR  FileNameBuf[1];
+    WCHAR  FileNameBuf[0];
 };
+static_assert(sizeof(FSP_FSCTL_DIR_INFO) == 104, "sizeof(FSP_FSCTL_DIR_INFO) must be 104");
 
 struct FSP_FSCTL_VOLUME_PARAMS {
     UINT16 Version;
@@ -74,13 +75,39 @@ struct FSP_FSCTL_VOLUME_PARAMS {
     UINT32 IrpTimeout;
     UINT32 IrpCapacity;
     UINT32 FileInfoTimeout;
-    UINT32 Flags;
+    UINT32 CaseSensitiveSearch:1;
+    UINT32 CasePreservedNames:1;
+    UINT32 UnicodeOnDisk:1;
+    UINT32 PersistentAcls:1;
+    UINT32 ReparsePoints:1;
+    UINT32 ReparsePointsAccessCheck:1;
+    UINT32 NamedStreams:1;
+    UINT32 HardLinks:1;
+    UINT32 ExtendedAttributes:1;
+    UINT32 ReadOnlyVolume:1;
+    UINT32 PostCleanupWhenModifiedOnly:1;
+    UINT32 PassQueryDirectoryPattern:1;
+    UINT32 AlwaysUseDoubleBuffering:1;
+    UINT32 PassQueryDirectoryFileName:1;
+    UINT32 FlushAndPurgeOnCleanup:1;
+    UINT32 DeviceControl:1;
+    UINT32 UmFileContextIsUserContext2:1;
+    UINT32 UmFileContextIsFullContext:1;
+    UINT32 UmNoReparsePointsDirCheck:1;
+    UINT32 UmReservedFlags:5;
+    UINT32 AllowOpenInKernelMode:1;
+    UINT32 CasePreservedExtendedAttributes:1;
+    UINT32 WslFeatures:1;
+    UINT32 DirectoryMarkerAsNextOffset:1;
+    UINT32 RejectIrpPriorToTransact0:1;
+    UINT32 SupportsPosixUnlinkRename:1;
+    UINT32 PostDispositionWhenNecessaryOnly:1;
+    UINT32 KmReservedFlags:1;
+    WCHAR  Prefix[192];
     WCHAR  FileSystemName[16];
-    UINT8  Reserved[432];
+    UINT8  Reserved[48];
 };
 static_assert(sizeof(FSP_FSCTL_VOLUME_PARAMS) == 504, "FSP_FSCTL_VOLUME_PARAMS must be 504 bytes");
-
-#pragma pack(pop)
 
 struct _FSP_FILE_SYSTEM {
     PVOID UserContext;
@@ -151,13 +178,23 @@ private:
     WinFspApi() {
         hDll_ = LoadLibraryW(L"winfsp-x64.dll");
         if (!hDll_) {
-            HKEY hKey;
-            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WinFsp", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-                wchar_t installDir[MAX_PATH];
-                DWORD bufSize = sizeof(installDir);
-                if (RegQueryValueExW(hKey, L"InstallDir", nullptr, nullptr, reinterpret_cast<LPBYTE>(installDir), &bufSize) == ERROR_SUCCESS) {
-                    std::wstring dllPath = std::wstring(installDir) + L"bin\\winfsp-x64.dll";
+            HKEY hKey = nullptr;
+            // Check 32-bit registry view where WinFsp stores SxsDir and InstallDir
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WinFsp", 0, KEY_READ | KEY_WOW64_32KEY, &hKey) == ERROR_SUCCESS ||
+                RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WinFsp", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+                wchar_t dirPath[MAX_PATH] = {0};
+                DWORD bufSize = sizeof(dirPath);
+                // Prefer SxS directory matching running SxS kernel driver if present
+                if (RegQueryValueExW(hKey, L"SxsDir", nullptr, nullptr, reinterpret_cast<LPBYTE>(dirPath), &bufSize) == ERROR_SUCCESS) {
+                    std::wstring dllPath = std::wstring(dirPath) + L"bin\\winfsp-x64.dll";
                     hDll_ = LoadLibraryW(dllPath.c_str());
+                }
+                if (!hDll_) {
+                    bufSize = sizeof(dirPath);
+                    if (RegQueryValueExW(hKey, L"InstallDir", nullptr, nullptr, reinterpret_cast<LPBYTE>(dirPath), &bufSize) == ERROR_SUCCESS) {
+                        std::wstring dllPath = std::wstring(dirPath) + L"bin\\winfsp-x64.dll";
+                        hDll_ = LoadLibraryW(dllPath.c_str());
+                    }
                 }
                 RegCloseKey(hKey);
             }
@@ -217,20 +254,25 @@ public:
         volParams_.MaxComponentLength = 255;
         volParams_.VolumeCreationTime = 0;
         volParams_.VolumeSerialNumber = 0x54455854; // "TEXT"
-        volParams_.Flags = 0;
+        volParams_.FileInfoTimeout = 1000;
+        volParams_.CasePreservedNames = 1;
+        volParams_.UnicodeOnDisk = 1;
         std::wcsncpy(volParams_.FileSystemName, L"EXT4", 15);
 
         std::memset(&iface_, 0, sizeof(iface_));
         iface_.GetVolumeInfo = MountGetVolumeInfo;
         iface_.GetSecurityByName = MountGetSecurityByName;
+        iface_.GetSecurity = MountGetSecurity;
+        iface_.Create = MountCreate;
         iface_.Open = MountOpen;
         iface_.Close = MountClose;
+        iface_.Cleanup = MountCleanup;
         iface_.Read = MountRead;
         iface_.GetFileInfo = MountGetFileInfo;
         iface_.ReadDirectory = MountReadDirectory;
 
-        std::wstring wDevicePath = L"\\Device\\FileSystem\\TitanExt";
-        NTSTATUS status = fsp.FspFileSystemCreate(nullptr, &volParams_, &iface_, &fspFs_);
+        wchar_t devicePath[] = L"WinFsp.Disk";
+        NTSTATUS status = fsp.FspFileSystemCreate(devicePath, &volParams_, &iface_, &fspFs_);
         if (status != STATUS_SUCCESS) {
             std::cerr << "[-] FspFileSystemCreate failed: 0x" << std::hex << status << "\n";
             return false;
@@ -282,15 +324,28 @@ private:
     }
 
     static NTSTATUS MountGetSecurityByName(FSP_FILE_SYSTEM *fs, PWSTR fileName, PUINT32 pFileAttributes, PSECURITY_DESCRIPTOR secDesc, SIZE_T *pSecDescSize) {
-        (void)fs; (void)secDesc; (void)pSecDescSize;
+        (void)fs; (void)secDesc;
+        if (pSecDescSize) *pSecDescSize = 0;
         if (pFileAttributes) {
-            if (std::wcscmp(fileName, L"\\") == 0) {
+            if (std::wcscmp(fileName, L"\\") == 0 || std::wcscmp(fileName, L"/") == 0) {
                 *pFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
             } else {
                 *pFileAttributes = FILE_ATTRIBUTE_NORMAL;
             }
         }
         return STATUS_SUCCESS;
+    }
+
+    static NTSTATUS MountGetSecurity(FSP_FILE_SYSTEM*, PVOID, PSECURITY_DESCRIPTOR, SIZE_T *pSecDescSize) {
+        if (pSecDescSize) *pSecDescSize = 0;
+        return STATUS_SUCCESS;
+    }
+
+    static NTSTATUS MountCreate(FSP_FILE_SYSTEM *fs, PWSTR fileName, UINT32, UINT32, UINT32, PSECURITY_DESCRIPTOR, UINT64, PVOID *pFileContext, FSP_FSCTL_FILE_INFO *fileInfo) {
+        return MountOpen(fs, fileName, 0, 0, pFileContext, fileInfo);
+    }
+
+    static VOID MountCleanup(FSP_FILE_SYSTEM*, PVOID, PWSTR, UINT32) {
     }
 
     static NTSTATUS MountOpen(FSP_FILE_SYSTEM *fs, PWSTR fileName, UINT32, UINT32, PVOID *pFileContext, FSP_FSCTL_FILE_INFO *fileInfo) {
@@ -315,11 +370,16 @@ private:
         ctx->isDirectory = ctx->inode.IsDirectory();
 
         if (fileInfo) {
+            uint64_t winTime = (static_cast<uint64_t>(ctx->inode.i_mtime) + 11644473600ULL) * 10000000ULL;
             fileInfo->FileAttributes = ctx->isDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
             fileInfo->FileSize = ctx->inode.FileSize();
             fileInfo->AllocationSize = (fileInfo->FileSize + 4095) & ~4095ULL;
             fileInfo->IndexNumber = ino;
-            fileInfo->HardLinks = ctx->inode.i_links_count;
+            fileInfo->HardLinks = 0;
+            fileInfo->CreationTime = winTime;
+            fileInfo->LastAccessTime = winTime;
+            fileInfo->LastWriteTime = winTime;
+            fileInfo->ChangeTime = winTime;
         }
 
         *pFileContext = ctx.release();
@@ -348,11 +408,16 @@ private:
 
     static NTSTATUS MountGetFileInfo(FSP_FILE_SYSTEM*, PVOID fileContext, FSP_FSCTL_FILE_INFO *fileInfo) {
         auto* ctx = static_cast<FileNodeContext*>(fileContext);
+        uint64_t winTime = (static_cast<uint64_t>(ctx->inode.i_mtime) + 11644473600ULL) * 10000000ULL;
         fileInfo->FileAttributes = ctx->isDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
         fileInfo->FileSize = ctx->inode.FileSize();
         fileInfo->AllocationSize = (fileInfo->FileSize + 4095) & ~4095ULL;
         fileInfo->IndexNumber = ctx->inodeNumber;
-        fileInfo->HardLinks = ctx->inode.i_links_count;
+        fileInfo->HardLinks = 0;
+        fileInfo->CreationTime = winTime;
+        fileInfo->LastAccessTime = winTime;
+        fileInfo->LastWriteTime = winTime;
+        fileInfo->ChangeTime = winTime;
         return STATUS_SUCCESS;
     }
 
@@ -367,7 +432,7 @@ private:
         }
 
         auto& fsp = WinFspApi::Get();
-        ULONG bytesTransferred = 0;
+        if (pBytesTransferred) *pBytesTransferred = 0;
         bool passMarker = (marker == nullptr || *marker == 0);
 
         for (const auto& ent : entries) {
@@ -381,19 +446,25 @@ private:
             auto* dirInfo = reinterpret_cast<FSP_FSCTL_DIR_INFO*>(dirBuf);
             std::memset(dirInfo, 0, sizeof(FSP_FSCTL_DIR_INFO));
 
-            dirInfo->Size = static_cast<UINT16>(sizeof(FSP_FSCTL_DIR_INFO) + (wName.size() * sizeof(WCHAR)));
+            uint64_t winTime = (1700000000ULL + 11644473600ULL) * 10000000ULL;
+            dirInfo->Size = static_cast<UINT16>(104 + (wName.size() * sizeof(WCHAR)));
             dirInfo->FileInfo.FileAttributes = (ent.fileType == EXT4_FT_DIR) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
             dirInfo->FileInfo.FileSize = ent.size;
             dirInfo->FileInfo.AllocationSize = (ent.size + 4095) & ~4095ULL;
             dirInfo->FileInfo.IndexNumber = ent.inodeNumber;
-            std::memcpy(dirInfo->FileNameBuf, wName.c_str(), wName.size() * sizeof(WCHAR));
+            dirInfo->FileInfo.HardLinks = 0;
+            dirInfo->FileInfo.CreationTime = winTime;
+            dirInfo->FileInfo.LastAccessTime = winTime;
+            dirInfo->FileInfo.LastWriteTime = winTime;
+            dirInfo->FileInfo.ChangeTime = winTime;
+            std::memcpy(reinterpret_cast<uint8_t*>(dirInfo) + 104, wName.c_str(), wName.size() * sizeof(WCHAR));
 
-            if (!fsp.FspFileSystemAddDirInfo(dirInfo, buffer, length, &bytesTransferred)) {
-                break;
+            if (!fsp.FspFileSystemAddDirInfo(dirInfo, buffer, length, pBytesTransferred)) {
+                return STATUS_SUCCESS;
             }
         }
 
-        if (pBytesTransferred) *pBytesTransferred = bytesTransferred;
+        fsp.FspFileSystemAddDirInfo(nullptr, buffer, length, pBytesTransferred);
         return STATUS_SUCCESS;
     }
 

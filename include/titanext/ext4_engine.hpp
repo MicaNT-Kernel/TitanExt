@@ -449,7 +449,7 @@ public:
         std::vector<uint8_t> blockBitmap(BLK_SIZE, 0);
         blockBitmap[0] = 0xEF; // bits 0..3 (blocks 0..3), bit 4 clear (block 4 free), bits 5..7 (blocks 5..7)
         for (uint32_t i = 1; i < 64; ++i) blockBitmap[i] = 0xFF; // blocks 8..511
-        blockBitmap[64] = 0x3F; // 6 bits: blocks 512..516 (itable) + block 517 (root dir)
+        blockBitmap[64] = 0x7F; // 7 bits: blocks 512..516 (itable) + block 517 (root dir) + block 518 (readme)
         uint32_t validBitmapBytes = (blocksInGroup0 + 7) / 8;
         if (validBitmapBytes < BLK_SIZE) {
             std::memset(blockBitmap.data() + validBitmapBytes, 0xFF, BLK_SIZE - validBitmapBytes);
@@ -459,7 +459,7 @@ public:
         // Block 3: Inode allocation bitmap
         std::vector<uint8_t> inodeBitmap(BLK_SIZE, 0);
         inodeBitmap[0] = 0xFF; // Inodes 1..8
-        inodeBitmap[1] = 0x03; // Inodes 9..10
+        inodeBitmap[1] = 0x07; // Inodes 9..11
         uint32_t validInodeBytes = (inodesPerGroup + 7) / 8;
         if (validInodeBytes < BLK_SIZE) {
             std::memset(inodeBitmap.data() + validInodeBytes, 0xFF, BLK_SIZE - validInodeBytes);
@@ -469,7 +469,10 @@ public:
         // Block 4: Reserved
         out.write(reinterpret_cast<const char*>(zeroBlock.data()), BLK_SIZE);
 
-        // Block 5: Inode Table (Root Inode is Inode #2)
+        // Block 5: Inode Table (Root Inode is Inode #2, Welcome Inode is Inode #11)
+        const std::string welcomeMsg = "Welcome to TitanExt on Windows NT!\r\nClean-room Ext4 storage engine and WinFsp user-mode filesystem driver.\r\n";
+        uint32_t welcomeBlockNum = rootDirBlockNum + 1; // Block 518
+
         std::vector<uint8_t> itableBlock(BLK_SIZE, 0);
         Ext4Inode rootInode{};
         rootInode.i_mode = EXT4_S_IFDIR | 0755;
@@ -490,6 +493,28 @@ public:
         extLeaf->SetPhysicalBlock(rootDirBlockNum);
 
         std::memcpy(itableBlock.data() + 256, &rootInode, sizeof(rootInode));
+
+        // Inode #11: README.txt
+        Ext4Inode readmeInode{};
+        readmeInode.i_mode = EXT4_S_IFREG | 0644;
+        readmeInode.i_links_count = 1;
+        readmeInode.i_size_lo = static_cast<uint32_t>(welcomeMsg.size());
+        readmeInode.i_blocks_lo = 8;
+        readmeInode.i_flags = EXT4_EXTENTS_FL;
+
+        auto* rExtHdr = reinterpret_cast<Ext4ExtentHeader*>(readmeInode.i_block);
+        rExtHdr->eh_magic = EXT4_EXT_MAGIC;
+        rExtHdr->eh_entries = 1;
+        rExtHdr->eh_max = 4;
+        rExtHdr->eh_depth = 0;
+
+        auto* rExtLeaf = reinterpret_cast<Ext4Extent*>(readmeInode.i_block + sizeof(Ext4ExtentHeader));
+        rExtLeaf->ee_block = 0;
+        rExtLeaf->ee_len = 1;
+        rExtLeaf->SetPhysicalBlock(welcomeBlockNum);
+
+        std::memcpy(itableBlock.data() + (10 * 256), &readmeInode, sizeof(readmeInode));
+
         out.write(reinterpret_cast<const char*>(itableBlock.data()), BLK_SIZE);
 
         // Write remaining blocks of the inode table (blocks 6 through 516)
@@ -498,7 +523,7 @@ public:
         }
 
         // Block 517: Root Directory Data Block
-        // Contains '.' and '..'
+        // Contains '.', '..', and 'README.txt'
         std::vector<uint8_t> rootDirBlock(BLK_SIZE, 0);
         auto* dot = reinterpret_cast<Ext4DirEntry2*>(rootDirBlock.data());
         dot->inode = EXT4_ROOT_INO;
@@ -509,16 +534,28 @@ public:
 
         auto* dotdot = reinterpret_cast<Ext4DirEntry2*>(rootDirBlock.data() + 12);
         dotdot->inode = EXT4_ROOT_INO;
-        dotdot->rec_len = static_cast<uint16_t>(BLK_SIZE - 12);
+        dotdot->rec_len = 12;
         dotdot->name_len = 2;
         dotdot->file_type = EXT4_FT_DIR;
         dotdot->name[0] = '.';
         dotdot->name[1] = '.';
 
+        auto* readmeEnt = reinterpret_cast<Ext4DirEntry2*>(rootDirBlock.data() + 24);
+        readmeEnt->inode = 11;
+        readmeEnt->rec_len = static_cast<uint16_t>(BLK_SIZE - 24);
+        readmeEnt->name_len = 10;
+        readmeEnt->file_type = EXT4_FT_REG_FILE;
+        std::memcpy(readmeEnt->name, "README.txt", 10);
+
         out.write(reinterpret_cast<const char*>(rootDirBlock.data()), BLK_SIZE);
 
+        // Block 518: README.txt Data Block
+        std::vector<uint8_t> dataBlock(BLK_SIZE, 0);
+        std::memcpy(dataBlock.data(), welcomeMsg.data(), welcomeMsg.size());
+        out.write(reinterpret_cast<const char*>(dataBlock.data()), BLK_SIZE);
+
         // Pad file to target size
-        uint64_t currentBlocks = rootDirBlockNum + 1;
+        uint64_t currentBlocks = welcomeBlockNum + 1;
         for (uint64_t b = currentBlocks; b < totalBlocks; ++b) {
             out.write(reinterpret_cast<const char*>(zeroBlock.data()), BLK_SIZE);
         }
