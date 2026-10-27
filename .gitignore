@@ -1,0 +1,35 @@
+# Build directories
+build/
+bin/
+dist/
+out/
+.vs/
+.vscode/
+
+# Compiled objects
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.a
+*.lib
+*.pdb
+
+# CMake files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+
+# Test disks
+*.img
+*.raw
+*.vhd
+*.vhdx
+*.iso
+test_vol.img
+
+# OS generated
+.DS_Store
+Thumbs.db
