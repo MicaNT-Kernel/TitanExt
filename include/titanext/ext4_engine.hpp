@@ -367,7 +367,7 @@ public:
         return true;
     }
 
-    static bool FormatVolume(const std::string& path, uint64_t sizeBytes, const std::string& label = "TitanExt") {
+    static bool FormatVolume(const std::string& path, uint64_t sizeBytes, const std::string& label = "Linux Volume") {
         constexpr uint32_t BLK_SIZE = 4096;
         if (sizeBytes < 16ULL * 1024 * 1024) { // Minimum 16 MB
             sizeBytes = 16ULL * 1024 * 1024;
@@ -580,7 +580,7 @@ private:
         char labelBuf[17]{0};
         std::memcpy(labelBuf, sb_.s_volume_name, 16);
         label_ = labelBuf;
-        if (label_.empty()) label_ = "TitanExt";
+        if (label_.empty()) label_ = "Linux Volume";
 
         // Read Block Group Descriptors Table (GDT)
         uint64_t totalBlocks = (static_cast<uint64_t>(sb_.s_blocks_count_hi) << 32) | sb_.s_blocks_count_lo;

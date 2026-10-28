@@ -11,7 +11,7 @@ int main(int argc, char* argv[]) {
 
     std::string path = argv[1];
     uint64_t sizeMB = 64; // Default 64 MB
-    std::string label = "TitanExt";
+    std::string label = "Linux Volume";
 
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];

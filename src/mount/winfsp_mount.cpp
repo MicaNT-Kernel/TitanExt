@@ -28,7 +28,7 @@ int main(int argc, char* argv[]) {
         std::cout << "========================================================================\n\n";
         std::cout << "Usage: titanext_mount <device_or_image_path> <drive_letter:> [options]\n\n";
         std::cout << "Options:\n";
-        std::cout << "  --label <name>         Set volume label (default: TITAN_EXT4)\n";
+        std::cout << "  --label <name>         Set volume label (default: Linux Volume or disk label)\n";
         std::cout << "  --readonly             Mount volume in read-only mode\n\n";
         std::cout << "Examples:\n";
         std::cout << "  titanext_mount linux_disk.img E:\n";
@@ -38,7 +38,8 @@ int main(int argc, char* argv[]) {
 
     std::string devicePath = argv[1];
     std::string driveLetter = argv[2];
-    std::wstring volumeLabel = L"TITAN_EXT4";
+    std::wstring volumeLabel;
+    bool labelSpecified = false;
     bool readOnly = false;
 
     for (int i = 3; i < argc; ++i) {
@@ -48,6 +49,7 @@ int main(int argc, char* argv[]) {
         } else if (arg == "--label" && i + 1 < argc) {
             std::string lStr = argv[++i];
             volumeLabel = std::wstring(lStr.begin(), lStr.end());
+            labelSpecified = true;
         }
     }
 
@@ -68,6 +70,15 @@ int main(int argc, char* argv[]) {
     if (!engine->Open(devicePath, readOnly)) {
         std::cerr << "[-] Error: Failed to open Ext4 volume at " << devicePath << "\n";
         return 1;
+    }
+
+    if (!labelSpecified) {
+        std::string diskLabel = engine->VolumeLabel();
+        if (!diskLabel.empty()) {
+            volumeLabel = std::wstring(diskLabel.begin(), diskLabel.end());
+        } else {
+            volumeLabel = L"Linux Volume";
+        }
     }
 
     std::signal(SIGINT, SigHandler);

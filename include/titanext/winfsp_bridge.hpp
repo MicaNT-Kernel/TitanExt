@@ -235,7 +235,7 @@ public:
     WinFspMountSession() = default;
     ~WinFspMountSession() { unmount(); }
 
-    bool mount(std::shared_ptr<Ext4Engine> engine, const std::string& mountPoint, const std::wstring& volumeLabel = L"TITAN_EXT4") {
+    bool mount(std::shared_ptr<Ext4Engine> engine, const std::string& mountPoint, const std::wstring& volumeLabel = L"Linux Volume") {
         unmount();
         engine_ = engine;
         mountPoint_ = mountPoint;
